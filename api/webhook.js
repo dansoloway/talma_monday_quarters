@@ -83,6 +83,38 @@ function getColorStatusLabel(endDateISO) {
   return 'ends after this week';
 }
 
+function parseIsoDate(value) {
+  if (!value) return null;
+  if (typeof value === 'string') {
+    const match = value.match(/^(\d{4}-\d{2}-\d{2})/);
+    return match ? match[1] : null;
+  }
+  if (typeof value === 'object') {
+    return parseIsoDate(value.date || value.from);
+  }
+  return null;
+}
+
+function parseTimelineFromEvent(event) {
+  let value = event?.value;
+  if (!value) return null;
+  if (typeof value === 'string') {
+    try { value = JSON.parse(value); } catch { return null; }
+  }
+  const inner = (value.from || value.to) ? value : (value.value || value);
+  const from = parseIsoDate(inner.from);
+  const to = parseIsoDate(inner.to);
+  if (!from || !to) return null;
+  return { from, to };
+}
+
+function parseTimelineFromText(text) {
+  if (!text) return null;
+  const match = text.match(/^(\d{4})-(\d{2})-(\d{2}) - (\d{4}-\d{2}-\d{2})$/);
+  if (!match) return null;
+  return { from: `${match[1]}-${match[2]}-${match[3]}`, to: match[4] };
+}
+
 module.exports = async function handler(req, res) {
   if (req.body?.challenge) {
     return res.status(200).json({ challenge: req.body.challenge });
@@ -120,18 +152,19 @@ module.exports = async function handler(req, res) {
     const item = itemRes.data?.items?.[0];
     if (!item) return res.status(200).json({ message: 'Item not found' });
 
-    const timeline = item.column_values.find((c) => c.id === timelineId)?.text;
-    if (!timeline) return res.status(200).json({ message: 'No timeline set' });
-
-    const dateMatch = timeline.match(/^(\d{4})-(\d{2})-(\d{2}) - (\d{4}-\d{2}-\d{2})$/);
-    if (!dateMatch) return res.status(200).json({ message: 'Invalid timeline format' });
+    const timelineText = item.column_values.find((c) => c.id === timelineId)?.text;
+    const dates = parseTimelineFromEvent(event) || parseTimelineFromText(timelineText);
+    if (!dates) {
+      if (!timelineText) return res.status(200).json({ message: 'No timeline set' });
+      return res.status(200).json({ message: 'Invalid timeline format' });
+    }
 
     const updates = {};
     const result = {};
 
     // Quarter from start month
     if (quarterId) {
-      const startMonth = parseInt(dateMatch[2], 10);
+      const startMonth = parseInt(dates.from.split('-')[1], 10);
       const correctQuarter = getQuarterFromMonth(startMonth);
       const currentQ = item.column_values.find((c) => c.id === quarterId)?.text;
       if (currentQ !== correctQuarter) {
@@ -145,7 +178,7 @@ module.exports = async function handler(req, res) {
 
     // Color status from end date
     if (colorStatusId) {
-      const endDateISO = dateMatch[4];
+      const endDateISO = dates.to;
       const correctLabel = getColorStatusLabel(endDateISO);
       const currentLabel = item.column_values.find((c) => c.id === colorStatusId)?.text;
       if (currentLabel !== correctLabel) {
