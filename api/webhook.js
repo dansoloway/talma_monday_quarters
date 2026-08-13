@@ -48,11 +48,14 @@ async function mondayApi(query) {
 
 async function getBoardColumns(boardId) {
   if (boardColumnCache[boardId]) return boardColumnCache[boardId];
-  const res = await mondayApi(`{ boards(ids: [${boardId}]) { columns { id title type settings_str } } }`);
-  const columns = res.data?.boards?.[0]?.columns || [];
+  const res = await mondayApi(`{ boards(ids: [${boardId}]) { columns { id title type settings_str } groups { id title } } }`);
+  const board = res.data?.boards?.[0] || {};
+  const columns = board.columns || [];
   const titleToId = {};
   columns.forEach((c) => { titleToId[c.title] = c.id; });
-  boardColumnCache[boardId] = { titleToId, columns };
+  const titleToGroupId = {};
+  (board.groups || []).forEach((g) => { titleToGroupId[g.title] = g.id; });
+  boardColumnCache[boardId] = { titleToId, columns, titleToGroupId };
   return boardColumnCache[boardId];
 }
 
@@ -143,6 +146,7 @@ module.exports = async function handler(req, res) {
 
     const itemRes = await mondayApi(`{
       items(ids: [${Number(itemId)}]) {
+        group { id title }
         column_values(ids: ["${timelineId}"${quarterId ? `, "${quarterId}"` : ''}${colorStatusId ? `, "${colorStatusId}"` : ''}]) {
           id text
         }
@@ -159,13 +163,15 @@ module.exports = async function handler(req, res) {
       return res.status(200).json({ message: 'Invalid timeline format' });
     }
 
+    const startMonth = parseInt(dates.from.split('-')[1], 10);
+    const correctQuarter = getQuarterFromMonth(startMonth);
+
     const updates = {};
     const result = {};
+    let didSomething = false;
 
     // Quarter from start month
     if (quarterId) {
-      const startMonth = parseInt(dates.from.split('-')[1], 10);
-      const correctQuarter = getQuarterFromMonth(startMonth);
       const currentQ = item.column_values.find((c) => c.id === quarterId)?.text;
       if (currentQ !== correctQuarter) {
         const dropdownId = getDropdownIdByLabel(bc, quarterId, correctQuarter);
@@ -187,18 +193,42 @@ module.exports = async function handler(req, res) {
       }
     }
 
-    if (Object.keys(updates).length === 0) {
+    if (Object.keys(updates).length > 0) {
+      const colVal = JSON.stringify(JSON.stringify(updates));
+      const updateRes = await mondayApi(`mutation { change_multiple_column_values(board_id: ${boardId}, item_id: ${Number(itemId)}, column_values: ${colVal}) { id } }`);
+      if (updateRes.data?.change_multiple_column_values) {
+        didSomething = true;
+      } else {
+        console.error(`Column update failed for item ${itemId} on board ${boardId}`);
+      }
+    }
+
+    // Move into Q1–Q4 group matching Timeline start quarter
+    const currentGroupTitle = item.group?.title || null;
+    const targetGroupId = bc.titleToGroupId?.[correctQuarter];
+    if (currentGroupTitle !== correctQuarter) {
+      if (targetGroupId) {
+        const moveRes = await mondayApi(
+          `mutation { move_item_to_group(item_id: ${Number(itemId)}, group_id: "${targetGroupId}") { id } }`
+        );
+        if (moveRes.data?.move_item_to_group) {
+          didSomething = true;
+          result.group = { from: currentGroupTitle, to: correctQuarter };
+        } else {
+          console.error(`Group move failed for item ${itemId} to ${correctQuarter}`);
+        }
+      } else {
+        console.log(`Board ${boardId} has no group titled "${correctQuarter}", skipping move`);
+        result.groupSkipped = correctQuarter;
+      }
+    }
+
+    if (!didSomething && !result.groupSkipped) {
       return res.status(200).json({ message: 'Already correct' });
     }
 
-    const colVal = JSON.stringify(JSON.stringify(updates));
-    const updateRes = await mondayApi(`mutation { change_multiple_column_values(board_id: ${boardId}, item_id: ${Number(itemId)}, column_values: ${colVal}) { id } }`);
-
-    if (updateRes.data?.change_multiple_column_values) {
-      console.log(`Updated item ${itemId} on board ${boardId}:`, JSON.stringify(result));
-      return res.status(200).json({ message: 'Updated', ...result });
-    }
-    return res.status(200).json({ message: 'Update failed' });
+    console.log(`Updated item ${itemId} on board ${boardId}:`, JSON.stringify(result));
+    return res.status(200).json({ message: didSomething ? 'Updated' : 'Already correct', ...result });
   } catch (error) {
     console.error('Webhook error:', error);
     return res.status(500).json({ error: 'Internal server error' });
