@@ -2,10 +2,12 @@
   "version": 2,
   "builds": [
     { "src": "api/webhook.js", "use": "@vercel/node" },
+    { "src": "api/webhook-year-quarters.js", "use": "@vercel/node" },
     { "src": "api/fa-departments.js", "use": "@vercel/node" }
   ],
   "routes": [
     { "src": "/api/webhook", "dest": "/api/webhook.js" },
+    { "src": "/api/webhook-year-quarters", "dest": "/api/webhook-year-quarters.js" },
     { "src": "/api/fa-departments", "dest": "/api/fa-departments.js" }
   ]
 }
